@@ -1,0 +1,153 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PaymentStatus {
+  CREATED
+  PENDING
+  SUCCEEDED
+  FAILED
+  EXPIRED
+  CANCELLED
+  REFUND_PENDING
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum PaymentMethodType {
+  QRIS
+  VIRTUAL_ACCOUNT
+  EWALLET
+}
+
+enum AttemptOutcome {
+  SUCCESS
+  ERROR
+  TIMEOUT
+  REJECTED
+}
+
+model Merchant {
+  id        String   @id @default(uuid()) @db.Uuid
+  code      String   @unique
+  name      String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  apiKeys  ApiKey[]
+  payments PaymentTransaction[]
+
+  @@map("merchants")
+}
+
+model ApiKey {
+  id         String    @id @default(uuid()) @db.Uuid
+  merchantId String    @db.Uuid
+  keyId      String    @unique
+  // secret dienkripsi AES-256-GCM dengan APP_ENCRYPTION_KEY; tidak pernah disimpan/ditampilkan polos
+  secretEnc  String
+  label      String?
+  active     Boolean   @default(true)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(6)
+  revokedAt  DateTime? @db.Timestamptz(6)
+
+  merchant Merchant @relation(fields: [merchantId], references: [id])
+
+  @@index([merchantId])
+  @@map("api_keys")
+}
+
+// Nominal = integer Rupiah (tanpa desimal). Int Postgres cukup untuk satu transaksi (batas dijaga MAX_PAYMENT_AMOUNT);
+// agregat/ledger nanti memakai BigInt.
+model PaymentTransaction {
+  id                 String            @id @default(uuid()) @db.Uuid
+  merchantId         String            @db.Uuid
+  reference          String            @unique
+  orderId            String
+  idempotencyKey     String
+  requestFingerprint String
+  amount             Int
+  currency           String            @default("IDR")
+  method             PaymentMethodType
+  channel            String?
+  status             PaymentStatus     @default(CREATED)
+  provider           String
+  providerRef        String?
+  instructions       Json?
+  customer           Json?
+  metadata           Json?
+  failureReason      String?
+  lateSettlement     Boolean           @default(false)
+  expiresAt          DateTime?         @db.Timestamptz(6)
+  paidAt             DateTime?         @db.Timestamptz(6)
+  createdAt          DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime          @updatedAt @db.Timestamptz(6)
+
+  merchant Merchant              @relation(fields: [merchantId], references: [id])
+  attempts PaymentAttempt[]
+  history  PaymentStatusHistory[]
+
+  @@unique([merchantId, idempotencyKey])
+  @@index([merchantId, orderId])
+  @@index([merchantId, createdAt])
+  @@index([status, expiresAt])
+  @@index([providerRef])
+  @@map("payment_transactions")
+}
+
+model PaymentAttempt {
+  id         String         @id @default(uuid()) @db.Uuid
+  paymentId  String         @db.Uuid
+  operation  String
+  outcome    AttemptOutcome
+  providerRef String?
+  error      String?
+  durationMs Int
+  createdAt  DateTime       @default(now()) @db.Timestamptz(6)
+
+  payment PaymentTransaction @relation(fields: [paymentId], references: [id])
+
+  @@index([paymentId])
+  @@map("payment_attempts")
+}
+
+model PaymentStatusHistory {
+  id         String         @id @default(uuid()) @db.Uuid
+  paymentId  String         @db.Uuid
+  fromStatus PaymentStatus?
+  toStatus   PaymentStatus
+  reason     String?
+  source     String
+  meta       Json?
+  createdAt  DateTime       @default(now()) @db.Timestamptz(6)
+
+  payment PaymentTransaction @relation(fields: [paymentId], references: [id])
+
+  @@index([paymentId, createdAt])
+  @@map("payment_status_history")
+}
+
+// Disiapkan untuk Webhook Engine (Phase berikutnya): simpan event mentah sebelum diproses, dedupe per (provider, eventId).
+model ProviderEvent {
+  id               String    @id @default(uuid()) @db.Uuid
+  provider         String
+  eventId          String?
+  reference        String?
+  signatureValid   Boolean
+  rawBody          String
+  headers          Json
+  processingStatus String    @default("RECEIVED")
+  error            String?
+  receivedAt       DateTime  @default(now()) @db.Timestamptz(6)
+  processedAt      DateTime? @db.Timestamptz(6)
+
+  @@unique([provider, eventId])
+  @@index([reference])
+  @@index([processingStatus, receivedAt])
+  @@map("provider_events")
+}
